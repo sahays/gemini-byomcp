@@ -1,6 +1,10 @@
 """
-Tests for `call_with_refresh`: retry-once-on-401 semantics, persistence of
-rotated tokens, and refresh-failure surfacing.
+Passthrough-mode tests for call_with_refresh.
+
+In Option A we don't store refresh tokens — Gemini Enterprise owns the OAuth
+lifecycle. So `call_with_refresh` is now a thin wrapper:
+  - 2xx → return as-is
+  - 401 → raise RefreshFailedException (auth_boundary surfaces it to GE)
 """
 
 from datetime import UTC, datetime, timedelta
@@ -17,148 +21,45 @@ from providers.base import (
 
 
 class FakeProvider:
-    """Minimal provider stub for testing call_with_refresh in isolation."""
-
-    def __init__(self, name="miro", refresh_payload=None, refresh_raises=False):
-        self._name = name
-        self.refresh_calls = []
-        self._refresh_payload = refresh_payload or {
-            "access_token": "new-token",
-            "refresh_token": "new-refresh",
-            "scopes": ["boards:read"],
-            "expires_at": "",
-        }
-        self._refresh_raises = refresh_raises
-
     @property
     def name(self):
-        return self._name
-
-    async def refresh_access_token(self, refresh_token):
-        self.refresh_calls.append(refresh_token)
-        if self._refresh_raises:
-            raise ValueError("refresh blew up")
-        return self._refresh_payload
+        return "miro"
 
 
-async def test_no_refresh_on_2xx(set_user_context, temp_db):
-    set_user_context(email="alice@example.com", token="old-token")
-    provider = FakeProvider()
+async def test_no_refresh_on_2xx(set_user_context):
+    set_user_context(email="alice@example.com", token="any-token")
 
     async def do_request(token):
-        # Sanity-check the token threaded through is the live one
-        assert token == "old-token"
+        assert token == "any-token"
         return httpx.Response(200, json={"ok": True})
 
-    response = await call_with_refresh(provider, do_request)
+    response = await call_with_refresh(FakeProvider(), do_request)
     assert response.status_code == 200
-    assert provider.refresh_calls == []  # no refresh happened
 
 
-async def test_refresh_on_401_and_retry(set_user_context, temp_db):
-    set_user_context(email="alice@example.com", token="stale-token", scopes=["boards:read"])
-    # Seed DB with a refresh token for this user+provider
-    await temp_db.save_tokens(
-        email="alice@example.com",
-        provider="miro",
-        access_token="stale-token",
-        refresh_token="r-1",
-        scopes=["boards:read"],
-        expires_at="",
-    )
-
-    provider = FakeProvider(name="miro")
-
-    call_log = []
-
-    async def do_request(token):
-        call_log.append(token)
-        if token == "stale-token":
-            return httpx.Response(401, json={"error": "expired"})
-        return httpx.Response(200, json={"ok": True})
-
-    response = await call_with_refresh(provider, do_request)
-    assert response.status_code == 200
-    assert provider.refresh_calls == ["r-1"]
-    assert call_log == ["stale-token", "new-token"]
-
-    # New tokens persisted
-    info = await temp_db.get_token_info("alice@example.com", "miro")
-    assert info["access_token"] == "new-token"
-    assert info["refresh_token"] == "new-refresh"
-
-
-async def test_refresh_preserves_old_refresh_token_when_provider_omits_it(
-    set_user_context, temp_db
-):
+async def test_passthrough_does_not_attempt_refresh_on_401(set_user_context):
+    """The proxy must NOT try to refresh in passthrough mode — GE owns OAuth."""
     set_user_context(email="alice@example.com", token="stale-token")
-    await temp_db.save_tokens(
-        email="alice@example.com",
-        provider="miro",
-        access_token="stale-token",
-        refresh_token="r-original",
-        scopes=["boards:read"],
-        expires_at="",
-    )
-
-    # Provider returns no refresh_token in refresh response — common for Figma
-    provider = FakeProvider(
-        refresh_payload={
-            "access_token": "new-token",
-            "refresh_token": "",
-            "scopes": [],
-            "expires_at": "",
-        }
-    )
+    call_count = {"n": 0}
 
     async def do_request(token):
-        return httpx.Response(401) if token == "stale-token" else httpx.Response(200)
-
-    await call_with_refresh(provider, do_request)
-    info = await temp_db.get_token_info("alice@example.com", "miro")
-    assert info["refresh_token"] == "r-original"  # preserved
-
-
-async def test_refresh_failure_when_no_refresh_token_stored(set_user_context, temp_db):
-    set_user_context(email="alice@example.com", token="stale-token")
-    # No save_tokens — DB has nothing for this user
-
-    provider = FakeProvider()
-
-    async def do_request(token):
+        call_count["n"] += 1
         return httpx.Response(401)
 
     with pytest.raises(RefreshFailedException):
-        await call_with_refresh(provider, do_request)
-    assert provider.refresh_calls == []  # never tried
+        await call_with_refresh(FakeProvider(), do_request)
+    # The request must be made exactly once — no retry.
+    assert call_count["n"] == 1
 
 
-async def test_refresh_failure_when_provider_throws(set_user_context, temp_db):
-    set_user_context(email="alice@example.com", token="stale-token")
-    await temp_db.save_tokens(
-        email="alice@example.com",
-        provider="miro",
-        access_token="stale-token",
-        refresh_token="r-1",
-        scopes=[],
-        expires_at="",
-    )
-
-    provider = FakeProvider(refresh_raises=True)
-
-    async def do_request(token):
-        return httpx.Response(401)
-
-    with pytest.raises(RefreshFailedException):
-        await call_with_refresh(provider, do_request)
-
-
+# compute_expires_at / is_expired still ship as utilities even though
+# passthrough mode doesn't use them. Keep the unit tests so we notice if
+# they regress when merging back to main.
 async def test_compute_expires_at_subtracts_safety_margin():
-    iso = compute_expires_at(3600)  # 1 hour
+    iso = compute_expires_at(3600)
     expiry = datetime.fromisoformat(iso)
     now = datetime.now(tz=UTC)
     delta = (expiry - now).total_seconds()
-    # ~3540s (3600 - 60 safety margin), give it a wide window for slow CI
     assert 3500 < delta < 3600
 
 

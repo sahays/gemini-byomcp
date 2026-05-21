@@ -87,8 +87,11 @@ def is_expired(expires_at_iso: str) -> bool:
 
 def auth_boundary(provider_name: str):
     """
-    Wrap a tool coroutine so MissingScopeException becomes a human-friendly auth link.
-    Identical UX across all providers — link points at /auth/{provider_name}.
+    Passthrough-mode variant: Gemini Enterprise owns the OAuth flow, so the
+    proxy never produces re-link URLs of its own. When the bearer token is
+    missing, missing a scope, or rejected by the SaaS, we surface a clear
+    message — GE will detect a 401 from /mcp (or the [ACTION REQUIRED] text
+    in a tool reply) and re-OAuth the user on its side.
     """
 
     def decorator(func: Callable):
@@ -98,30 +101,22 @@ def auth_boundary(provider_name: str):
                 return await func(*args, **kwargs)
             except MissingScopeException as e:
                 if not e.active_scopes:
-                    user_email = config.current_user_email.get()
-                    host = config.current_host.get()
-                    protocol = "http" if "localhost" in host or "127.0.0.1" in host else "https"
-                    auth_url = f"{protocol}://{host}/auth/{provider_name}?user={user_email}"
                     return (
-                        f"[ACTION REQUIRED] Your {provider_name.capitalize()} account is not linked.\n"
-                        f"Please link your account securely by visiting this authorization link:\n"
-                        f"{auth_url}"
+                        f"[ACTION REQUIRED] No {provider_name.capitalize()} bearer token "
+                        f"was received. Have Gemini Enterprise re-authenticate the user."
                     )
                 missing = [s for s in e.required_scopes if s not in e.active_scopes]
                 label = "scope" if len(missing) == 1 else "scopes"
                 return (
                     f"[PERMISSION REQUIRED] {provider_name.capitalize()} {label} "
-                    f"{', '.join(repr(s) for s in missing)} not granted."
+                    f"{', '.join(repr(s) for s in missing)} not granted in the data-source "
+                    f"OAuth config. Add it in the Gemini Enterprise Authentication settings."
                 )
             except RefreshFailedException:
-                user_email = config.current_user_email.get()
-                host = config.current_host.get()
-                protocol = "http" if "localhost" in host or "127.0.0.1" in host else "https"
-                auth_url = f"{protocol}://{host}/auth/{provider_name}?user={user_email}"
                 return (
-                    f"[ACTION REQUIRED] Your {provider_name.capitalize()} session expired and "
-                    f"could not be refreshed automatically.\n"
-                    f"Please re-link your account: {auth_url}"
+                    f"[ACTION REQUIRED] The {provider_name.capitalize()} bearer token was "
+                    f"rejected (expired or invalid). Gemini Enterprise should re-OAuth the "
+                    f"user against the SaaS."
                 )
             except Exception as e:
                 logger.error(f"Unexpected tool error: {e}", exc_info=True)
@@ -137,55 +132,24 @@ HttpCall = Callable[[str], Awaitable[httpx.Response]]
 
 async def call_with_refresh(provider: "BaseProvider", request_fn: HttpCall) -> httpx.Response:
     """
-    Execute request_fn(access_token). If the response is 401, refresh the user's token,
-    persist the new tokens, update the active ContextVars, and retry once.
-
-    request_fn must be a coroutine that accepts a bearer token string and returns an httpx.Response.
+    Passthrough-mode variant: the proxy doesn't hold a refresh_token (Gemini
+    Enterprise owns OAuth in this branch), so we never attempt to refresh.
+    A 401 from the SaaS means the bearer token GE sent is invalid/expired —
+    we surface that to the caller via RefreshFailedException so auth_boundary
+    can return a re-auth-needed message; GE will then redo the OAuth flow with
+    the user on its side.
     """
-    # Local import avoids a circular dependency between database and providers
-    from database import db
-
     token = config.current_saas_token.get()
     response = await request_fn(token)
     if response.status_code != 401:
         return response
 
-    user_email = config.current_user_email.get()
-    token_info = await db.get_token_info(user_email, provider.name)
-    refresh_token = (token_info or {}).get("refresh_token", "")
-    if not refresh_token:
-        logger.warning(f"401 from {provider.name} for {user_email}; no refresh_token available.")
-        raise RefreshFailedException(f"No refresh_token stored for {provider.name}")
-
-    try:
-        new_tokens = await provider.refresh_access_token(refresh_token)
-    except Exception as e:
-        logger.error(f"Refresh failed for {provider.name}/{user_email}: {e}")
-        raise RefreshFailedException(str(e)) from e
-
-    new_access = new_tokens.get("access_token")
-    if not new_access:
-        raise RefreshFailedException(f"{provider.name} refresh returned empty access_token")
-
-    # Some providers omit refresh_token in the refresh response; preserve the original.
-    persisted_refresh = new_tokens.get("refresh_token") or refresh_token
-    persisted_scopes = new_tokens.get("scopes") or (token_info or {}).get("scopes", [])
-
-    await db.save_tokens(
-        email=user_email,
-        provider=provider.name,
-        access_token=new_access,
-        refresh_token=persisted_refresh,
-        scopes=persisted_scopes,
-        expires_at=new_tokens.get("expires_at", ""),
+    logger.warning(
+        f"401 from {provider.name}; passthrough mode — Gemini Enterprise must re-OAuth the user."
     )
-
-    # Refresh the request-scoped token so downstream code sees the new value.
-    config.current_saas_token.set(new_access)
-    config.current_saas_scopes.set(persisted_scopes)
-
-    logger.info(f"Refreshed {provider.name} token for {user_email}; retrying request.")
-    return await request_fn(new_access)
+    raise RefreshFailedException(
+        f"{provider.name} rejected the bearer token; GE needs to re-authenticate the user."
+    )
 
 
 class BaseProvider(ABC):

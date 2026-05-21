@@ -181,7 +181,9 @@ async def test_get_miro_board_items_requires_token(set_user_context):
     tools = collect_tools(MiroProvider())
     out = await tools["get_miro_board_items"](board_id="X")
     assert "[ACTION REQUIRED]" in out
-    assert "/auth/miro?user=alice@example.com" in out
+    # Passthrough mode: tell GE to re-OAuth; no proxy-side /auth URL.
+    assert "/auth/" not in out
+    assert "bearer token" in out.lower()
 
 
 async def test_create_sticky_note_requires_write_scope(set_user_context):

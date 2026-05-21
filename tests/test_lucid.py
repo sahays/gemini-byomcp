@@ -191,4 +191,5 @@ async def test_lucid_tool_requires_token(set_user_context):
     tools = collect_tools(LucidProvider())
     out = await tools["get_lucid_user_profile"]()
     assert "[ACTION REQUIRED]" in out
-    assert "/auth/lucid?user=alice@example.com" in out
+    # Passthrough mode: tell GE to re-OAuth; no proxy-side /auth URL.
+    assert "/auth/" not in out

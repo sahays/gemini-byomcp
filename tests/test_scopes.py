@@ -1,8 +1,8 @@
 """
-Scope-enforcement tests.
+Passthrough-mode tests for require_scopes + auth_boundary.
 
-Covers `require_scopes` (raises) and `auth_boundary` (translates exceptions
-into user-friendly prompts).
+In Option A there's no /auth/* URL to send the user to, so the boundary
+returns a brief "ask GE to re-OAuth the user" instruction instead.
 """
 
 import pytest
@@ -52,7 +52,7 @@ async def test_require_scopes_passes_when_all_present(set_user_context):
 
 
 async def test_auth_boundary_handles_no_token(set_user_context):
-    set_user_context(email="alice@example.com", host="proxy.example.com", token="", scopes=[])
+    set_user_context(token="", scopes=[])
 
     @auth_boundary("miro")
     @require_scopes(["boards:read"])
@@ -61,13 +61,13 @@ async def test_auth_boundary_handles_no_token(set_user_context):
 
     out = await tool()
     assert "[ACTION REQUIRED]" in out
-    assert "https://proxy.example.com/auth/miro?user=alice@example.com" in out
+    assert "bearer token" in out.lower()
+    # Passthrough: no /auth/miro URL should appear.
+    assert "/auth/" not in out
 
 
 async def test_auth_boundary_handles_missing_scope(set_user_context):
-    set_user_context(
-        email="alice@example.com", host="proxy.example.com", token="tok", scopes=["boards:read"]
-    )
+    set_user_context(token="tok", scopes=["boards:read"])
 
     @auth_boundary("miro")
     @require_scopes(["boards:write"])
@@ -78,22 +78,12 @@ async def test_auth_boundary_handles_missing_scope(set_user_context):
     assert "[PERMISSION REQUIRED]" in out
     assert "boards:write" in out
     assert "not granted" in out
-
-
-async def test_auth_boundary_uses_http_on_localhost(set_user_context):
-    set_user_context(email="alice@example.com", host="localhost:8080", token="", scopes=[])
-
-    @auth_boundary("figma")
-    @require_scopes(["file_content:read"])
-    async def tool():
-        return "x"
-
-    out = await tool()
-    assert "http://localhost:8080/auth/figma?user=alice@example.com" in out
+    # Mentions the GE data-source config, not a proxy /auth URL.
+    assert "Gemini Enterprise" in out
 
 
 async def test_auth_boundary_handles_refresh_failure(set_user_context):
-    set_user_context(email="alice@example.com", host="proxy.example.com", token="tok")
+    set_user_context(token="tok")
 
     @auth_boundary("lucid")
     async def tool():
@@ -101,8 +91,8 @@ async def test_auth_boundary_handles_refresh_failure(set_user_context):
 
     out = await tool()
     assert "[ACTION REQUIRED]" in out
-    assert "expired" in out.lower() or "re-link" in out.lower()
-    assert "/auth/lucid?user=alice@example.com" in out
+    assert "rejected" in out.lower() or "expired" in out.lower()
+    assert "/auth/" not in out
 
 
 async def test_auth_boundary_swallows_unexpected_errors(set_user_context):
