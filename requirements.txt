@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+fastmcp
+httpx
+google-cloud-firestore
+google-auth
+pyjwt
+python-dotenv

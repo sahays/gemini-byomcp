@@ -1,0 +1,27 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["default.json", "scripts"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "W",   # pycodestyle warnings
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+]
+ignore = [
+    "E501",  # line too long — the formatter handles this
+    "B008",  # function calls in defaults — common in FastAPI
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "B011",  # assert False in tests is fine
+    "F841",  # unused variables in test fixtures are common
+]
+"providers/__init__.py" = [
+    "F401",  # re-exports
+]
