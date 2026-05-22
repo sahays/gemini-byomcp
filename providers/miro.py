@@ -246,22 +246,31 @@ class MiroProvider(BaseProvider):
 
             return f"Successfully deleted item (ID: {item_id}) from board (ID: {board_id})."
 
+        def _format_boards(data: dict) -> str:
+            boards = data.get("data", []) or []
+            if not boards:
+                return "No accessible Miro boards found."
+            lines = [
+                f"- {b.get('name', '(untitled)')} (id: {b.get('id', '?')})"
+                + (f" — {b.get('description', '')}" if b.get("description") else "")
+                for b in boards
+            ]
+            return (
+                f"Miro Boards ({len(boards)} of {data.get('total', len(boards))}):\n"
+                + "\n".join(lines)
+            )
+
         @mcp_app.tool()
         @auth_boundary("miro")
         @require_scopes([SCOPE_BOARDS_READ])
-        async def list_miro_boards(query: str = "", limit: int = 20) -> str:
+        async def list_miro_boards() -> str:
             """
-            Lists Miro boards accessible to the signed-in user, optionally filtered by a
-            free-text query. Use this when the user asks "what boards do I have", "find my
-            board about X", or any board-discovery question.
-
-            Args:
-                query (str): Optional free-text filter applied server-side via Miro's `query` param.
-                limit (int): Max boards to return (Miro caps at 50).
+            Lists all Miro boards accessible to the signed-in user (up to 50 most-recent).
+            Use this whenever the user asks any variant of "what boards do I have", "list
+            my Miro boards", or "show me my boards" — DO NOT prompt the user for a query
+            string. If the user wants to FILTER by a keyword, use search_miro_boards instead.
             """
-            url = f"{MIRO_API_BASE}/boards?limit={min(max(limit, 1), 50)}"
-            if query:
-                url += f"&query={quote(query)}"
+            url = f"{MIRO_API_BASE}/boards?limit=50"
 
             async def do_request(token: str) -> httpx.Response:
                 async with httpx.AsyncClient() as client:
@@ -280,19 +289,41 @@ class MiroProvider(BaseProvider):
             if response.status_code != 200:
                 return f"Miro API rejected the request. Status code: {response.status_code}."
 
-            data = response.json() or {}
-            boards = data.get("data", []) or []
-            if not boards:
-                return "No accessible Miro boards found."
-            lines = [
-                f"- {b.get('name', '(untitled)')} (id: {b.get('id', '?')})"
-                + (f" — {b.get('description', '')}" if b.get("description") else "")
-                for b in boards
-            ]
-            return (
-                f"Miro Boards ({len(boards)} of {data.get('total', len(boards))}):\n"
-                + "\n".join(lines)
-            )
+            return _format_boards(response.json() or {})
+
+        @mcp_app.tool()
+        @auth_boundary("miro")
+        @require_scopes([SCOPE_BOARDS_READ])
+        async def search_miro_boards(query: str) -> str:
+            """
+            Searches Miro boards by a free-text keyword (board name/description). Use this
+            ONLY when the user explicitly provides a search term (e.g. "find my Miro board
+            about Q3 planning"). Do NOT use this for generic "list my boards" requests —
+            use list_miro_boards for those.
+
+            Args:
+                query (str): The keyword to filter boards by.
+            """
+            url = f"{MIRO_API_BASE}/boards?limit=50&query={quote(query)}"
+
+            async def do_request(token: str) -> httpx.Response:
+                async with httpx.AsyncClient() as client:
+                    return await client.get(
+                        url,
+                        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                    )
+
+            try:
+                response = await call_with_refresh(provider, do_request)
+            except httpx.RequestError as e:
+                return f"Network error occurred while connecting to Miro: {str(e)}"
+
+            if response.status_code == 403:
+                return "Error: The token does not have boards:read access."
+            if response.status_code != 200:
+                return f"Miro API rejected the request. Status code: {response.status_code}."
+
+            return _format_boards(response.json() or {})
 
         @mcp_app.tool()
         @auth_boundary("miro")

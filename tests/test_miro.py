@@ -201,11 +201,12 @@ async def test_create_sticky_note_requires_write_scope(set_user_context):
 
 
 @respx.mock
-async def test_list_miro_boards_calls_v2_boards(set_user_context, temp_db):
+async def test_list_miro_boards_no_args(set_user_context, temp_db):
+    """list_miro_boards has no params and asks Miro for the unfiltered list."""
     set_user_context(email="alice@example.com", token="AT", scopes=["boards:read"])
     await temp_db.save_tokens("alice@example.com", "miro", "AT", "RT", ["boards:read"], "")
 
-    route = respx.get("https://api.miro.com/v2/boards?limit=20&query=plan").mock(
+    route = respx.get("https://api.miro.com/v2/boards?limit=50").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -221,28 +222,29 @@ async def test_list_miro_boards_calls_v2_boards(set_user_context, temp_db):
     from tests._helpers import collect_tools
 
     tools = collect_tools(MiroProvider())
-    out = await tools["list_miro_boards"](query="plan", limit=20)
+    out = await tools["list_miro_boards"]()
     assert route.called
-    req = route.calls.last.request
-    assert req.headers["Authorization"] == "Bearer AT"
-    assert "Q3 plan" in out
-    assert "b1" in out
+    assert route.calls.last.request.headers["Authorization"] == "Bearer AT"
+    assert "Q3 plan" in out and "Roadmap" in out
 
 
-async def test_list_miro_boards_clamps_limit(set_user_context, temp_db):
-    """limit > 50 must be clamped to 50 (Miro's max)."""
+@respx.mock
+async def test_search_miro_boards_passes_query(set_user_context, temp_db):
     set_user_context(email="alice@example.com", token="AT", scopes=["boards:read"])
     await temp_db.save_tokens("alice@example.com", "miro", "AT", "RT", ["boards:read"], "")
 
-    with respx.mock(assert_all_called=False) as mock:
-        route = mock.get("https://api.miro.com/v2/boards?limit=50").mock(
-            return_value=httpx.Response(200, json={"data": [], "total": 0})
+    route = respx.get("https://api.miro.com/v2/boards?limit=50&query=plan").mock(
+        return_value=httpx.Response(
+            200, json={"total": 1, "data": [{"id": "b1", "name": "Q3 plan"}]}
         )
-        from tests._helpers import collect_tools
+    )
 
-        tools = collect_tools(MiroProvider())
-        await tools["list_miro_boards"](limit=999)
-        assert route.called
+    from tests._helpers import collect_tools
+
+    tools = collect_tools(MiroProvider())
+    out = await tools["search_miro_boards"](query="plan")
+    assert route.called
+    assert "Q3 plan" in out
 
 
 @respx.mock
