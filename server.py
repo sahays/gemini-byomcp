@@ -79,7 +79,9 @@ _PROVIDER_SCOPES = {
 }
 ACTIVE_PROVIDER_SCOPES = _PROVIDER_SCOPES.get(active_provider_name, [])
 
-mcp_asgi_app = _mcp.http_app(path="/", transport="streamable-http")
+# Mount FastMCP at exactly /mcp (no trailing slash) so we don't issue 307s
+# to clients (like GE) that don't follow redirects on POST.
+mcp_asgi_app = _mcp.http_app(path="/mcp", transport="streamable-http")
 
 app = FastAPI(
     title="Gemini Enterprise Custom MCP Gateway (passthrough)",
@@ -180,7 +182,7 @@ def health():
 
 
 # --- FastMCP App Mount ---
-app.mount("/mcp", mcp_asgi_app)
+app.mount("/", mcp_asgi_app)
 
 if __name__ == "__main__":
     import uvicorn

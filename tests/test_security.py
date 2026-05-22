@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 @pytest.fixture
 def client():
     """Use TestClient as a context manager so FastMCP's lifespan starts up
-    (needed for /mcp/ requests to find an initialized session manager)."""
+    (needed for /mcp requests to find an initialized session manager)."""
     import server
 
     with TestClient(server.app) as c:
@@ -32,7 +32,7 @@ def test_health_is_public(client):
 
 def test_protected_route_rejects_missing_bearer(client):
     """Without a Bearer header, /mcp returns 401 and a WWW-Authenticate challenge."""
-    resp = client.post("/mcp/", json={})
+    resp = client.post("/mcp", json={})
     assert resp.status_code == 401
     assert "Missing Bearer token" in resp.text
     assert resp.headers.get("WWW-Authenticate", "").startswith("Bearer")
@@ -45,7 +45,7 @@ def test_protected_route_accepts_any_bearer(client):
     A malformed/test token therefore passes the middleware but the downstream
     MCP layer may still 400 the request (we only assert it's not 401)."""
     resp = client.post(
-        "/mcp/",
+        "/mcp",
         json={},
         headers={
             "Authorization": "Bearer test-passthrough-token",
