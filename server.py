@@ -10,7 +10,6 @@ The branch is intended to be deployed side-by-side with the main branch so the
 two architectures can be compared on the same GCP project.
 """
 
-import logging
 import sys
 
 from fastapi import FastAPI, Request
@@ -19,32 +18,41 @@ from fastapi.responses import JSONResponse
 from fastmcp import FastMCP
 
 from config import config
+from logging_setup import (
+    Timer,
+    configure_logging,
+    current_request_id,
+    log_event,
+    new_request_id,
+)
 from providers import registry
 
-# --- Structured Semantic Logger Config ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='{"timestamp":"%(asctime)s", "severity":"%(levelname)s", "logger":"%(name)s", "message":"%(message)s"}',
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
-logger = logging.getLogger("mcp-gateway")
+configure_logging()
 
-# 1. Initialize FastMCP FIRST based on the active deployment provider
 active_provider_name = config.ACTIVE_PROVIDER
-logger.info(
-    f"Initializing FastMCP for active provider: [{active_provider_name}] (passthrough mode)"
+log_event(
+    "info",
+    "boot.init_fastmcp",
+    logger_name="mcp-gateway",
+    provider=active_provider_name,
+    mode="passthrough",
 )
 
 _mcp = FastMCP(
     name=f"Gemini-Enterprise-{active_provider_name.capitalize()}-Gateway",
 )
 
-# 2. Register tools for the active provider
 try:
     active_provider = registry.get(active_provider_name)
     active_provider.register_mcp_tools(_mcp)
 except Exception as e:
-    logger.critical(f"Failed to load active provider tools: {e}")
+    log_event(
+        "critical",
+        "boot.provider_load_failed",
+        logger_name="mcp-gateway",
+        provider=active_provider_name,
+        error=str(e),
+    )
     sys.exit(1)
 
 # Discover the provider's full scope list once; in passthrough mode we assume
@@ -73,7 +81,6 @@ ACTIVE_PROVIDER_SCOPES = _PROVIDER_SCOPES.get(active_provider_name, [])
 
 mcp_asgi_app = _mcp.http_app(path="/", transport="streamable-http")
 
-# 3. Initialize FastAPI App
 app = FastAPI(
     title="Gemini Enterprise Custom MCP Gateway (passthrough)",
     description="Option A: stateless SaaS-token passthrough; GE owns OAuth.",
@@ -92,13 +99,36 @@ app.add_middleware(
 # --- Passthrough Bearer Middleware ---
 @app.middleware("http")
 async def bearer_passthrough_middleware(request: Request, call_next):
-    # /health is public; everything else needs a bearer token.
+    # Assign or honor inbound request id; propagated to every log line in this scope.
+    rid = request.headers.get("X-Request-Id") or new_request_id()
+    ctx_rid = current_request_id.set(rid)
+
+    # /health and /  are public.
     if request.url.path in ["/health", "/"]:
-        return await call_next(request)
+        try:
+            return await call_next(request)
+        finally:
+            current_request_id.reset(ctx_rid)
+
+    log_event(
+        "info",
+        "http.ingress",
+        logger_name="mcp-gateway",
+        method=request.method,
+        path=request.url.path,
+        origin=request.headers.get("origin", ""),
+        user_agent=request.headers.get("user-agent", "")[:120],
+    )
 
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
-        logger.warning("Unauthenticated request blocked: missing Bearer token.")
+        log_event(
+            "warning",
+            "http.unauthenticated",
+            logger_name="mcp-gateway",
+            path=request.url.path,
+        )
+        current_request_id.reset(ctx_rid)
         return JSONResponse(
             status_code=401,
             content={
@@ -116,17 +146,26 @@ async def bearer_passthrough_middleware(request: Request, call_next):
     ctx_token = config.current_saas_token.set(token)
     ctx_scopes = config.current_saas_scopes.set(list(ACTIVE_PROVIDER_SCOPES))
     ctx_host = config.current_host.set(request.headers.get("host", "localhost:8080"))
-    # No identity available in passthrough mode; tools that reference
-    # current_user_email use it only for re-link prompts which don't apply here.
     ctx_email = config.current_user_email.set("ge-passthrough")
 
     try:
-        return await call_next(request)
+        with Timer() as t:
+            response = await call_next(request)
+        log_event(
+            "info",
+            "http.response",
+            logger_name="mcp-gateway",
+            path=request.url.path,
+            status_code=response.status_code,
+            latency_ms=t.elapsed_ms,
+        )
+        return response
     finally:
         config.current_saas_token.reset(ctx_token)
         config.current_saas_scopes.reset(ctx_scopes)
         config.current_host.reset(ctx_host)
         config.current_user_email.reset(ctx_email)
+        current_request_id.reset(ctx_rid)
 
 
 @app.get("/health")
@@ -146,5 +185,11 @@ app.mount("/mcp", mcp_asgi_app)
 if __name__ == "__main__":
     import uvicorn
 
-    logger.info(f"Launching passthrough MCP Gateway on port {config.PORT}")
+    log_event(
+        "info",
+        "boot.serving",
+        logger_name="mcp-gateway",
+        port=config.PORT,
+        provider=active_provider_name,
+    )
     uvicorn.run("server:app", host="0.0.0.0", port=config.PORT, log_level="warning")

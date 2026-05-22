@@ -24,6 +24,7 @@ logger = logging.getLogger("mcp-providers-miro")
 MIRO_AUTHORIZE_URL = "https://miro.com/oauth/authorize"
 MIRO_TOKEN_URL = "https://api.miro.com/v1/oauth/token"
 MIRO_API_BASE = "https://api.miro.com/v2"
+MIRO_API_V1 = "https://api.miro.com/v1"
 
 # Single source of truth for Miro scope strings. The consent URL requests the union
 # of these; tool decorators must only reference values from this list.
@@ -244,3 +245,304 @@ class MiroProvider(BaseProvider):
                 return f"Miro API rejected deletion. Status code: {response.status_code}."
 
             return f"Successfully deleted item (ID: {item_id}) from board (ID: {board_id})."
+
+        @mcp_app.tool()
+        @auth_boundary("miro")
+        @require_scopes([SCOPE_BOARDS_READ])
+        async def list_miro_boards(query: str = "", limit: int = 20) -> str:
+            """
+            Lists Miro boards accessible to the signed-in user, optionally filtered by a
+            free-text query. Use this when the user asks "what boards do I have", "find my
+            board about X", or any board-discovery question.
+
+            Args:
+                query (str): Optional free-text filter applied server-side via Miro's `query` param.
+                limit (int): Max boards to return (Miro caps at 50).
+            """
+            url = f"{MIRO_API_BASE}/boards?limit={min(max(limit, 1), 50)}"
+            if query:
+                url += f"&query={quote(query)}"
+
+            async def do_request(token: str) -> httpx.Response:
+                async with httpx.AsyncClient() as client:
+                    return await client.get(
+                        url,
+                        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                    )
+
+            try:
+                response = await call_with_refresh(provider, do_request)
+            except httpx.RequestError as e:
+                return f"Network error occurred while connecting to Miro: {str(e)}"
+
+            if response.status_code == 403:
+                return "Error: The token does not have boards:read access."
+            if response.status_code != 200:
+                return f"Miro API rejected the request. Status code: {response.status_code}."
+
+            data = response.json() or {}
+            boards = data.get("data", []) or []
+            if not boards:
+                return "No accessible Miro boards found."
+            lines = [
+                f"- {b.get('name', '(untitled)')} (id: {b.get('id', '?')})"
+                + (f" — {b.get('description', '')}" if b.get("description") else "")
+                for b in boards
+            ]
+            return (
+                f"Miro Boards ({len(boards)} of {data.get('total', len(boards))}):\n"
+                + "\n".join(lines)
+            )
+
+        @mcp_app.tool()
+        @auth_boundary("miro")
+        @require_scopes([SCOPE_BOARDS_READ])
+        async def get_miro_board(board_id: str) -> str:
+            """
+            Retrieves metadata about a specific Miro board (name, description, view link,
+            owner, modified time). Use this when the user asks "tell me about board X" or
+            "summarize board X" without yet wanting the items inside.
+
+            Args:
+                board_id (str): The unique alphanumeric ID of the Miro board.
+            """
+            url = f"{MIRO_API_BASE}/boards/{board_id}"
+
+            async def do_request(token: str) -> httpx.Response:
+                async with httpx.AsyncClient() as client:
+                    return await client.get(
+                        url,
+                        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                    )
+
+            try:
+                response = await call_with_refresh(provider, do_request)
+            except httpx.RequestError as e:
+                return f"Network error occurred while connecting to Miro: {str(e)}"
+
+            if response.status_code == 404:
+                return "Error: Board not found. Verify the board_id."
+            if response.status_code == 403:
+                return "Error: Access forbidden for this board."
+            if response.status_code != 200:
+                return f"Miro API rejected the request. Status code: {response.status_code}."
+
+            b = response.json() or {}
+            return (
+                f"Board: {b.get('name', '(untitled)')} (id: {b.get('id', '?')})\n"
+                f"Description: {b.get('description', '(none)')}\n"
+                f"View link: {b.get('viewLink', '(none)')}\n"
+                f"Owner: {(b.get('owner') or {}).get('name', '?')}\n"
+                f"Modified: {b.get('modifiedAt', '?')}"
+            )
+
+        @mcp_app.tool()
+        @auth_boundary("miro")
+        @require_scopes([SCOPE_BOARDS_WRITE])
+        async def create_miro_board(name: str, description: str = "", team_id: str = "") -> str:
+            """
+            Creates a new Miro board owned by the signed-in user. Use this when the user
+            asks to start a new board, kick off a brainstorm, or initialize a workspace.
+
+            Args:
+                name (str): Display name for the new board.
+                description (str): Optional description.
+                team_id (str): Optional Miro team to attach the board to. If omitted Miro
+                    places it in the user's default team.
+            """
+            payload: dict = {"name": name}
+            if description:
+                payload["description"] = description
+            if team_id:
+                payload["teamId"] = team_id
+
+            async def do_request(token: str) -> httpx.Response:
+                async with httpx.AsyncClient() as client:
+                    return await client.post(
+                        f"{MIRO_API_BASE}/boards",
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Content-Type": "application/json",
+                            "Accept": "application/json",
+                        },
+                        json=payload,
+                    )
+
+            try:
+                response = await call_with_refresh(provider, do_request)
+            except httpx.RequestError as e:
+                return f"Network error occurred while connecting to Miro: {str(e)}"
+
+            if response.status_code not in (200, 201):
+                return f"Miro API rejected board creation. Status code: {response.status_code}."
+            b = response.json() or {}
+            return (
+                f"Created Miro board '{b.get('name', name)}' (id: {b.get('id', '?')}).\n"
+                f"View link: {b.get('viewLink', '(none)')}"
+            )
+
+        @mcp_app.tool()
+        @auth_boundary("miro")
+        @require_scopes([SCOPE_BOARDS_EXPORT])
+        async def create_miro_board_export_job(board_id_list: str, format: str = "pdf") -> str:
+            """
+            Triggers an async export job for one or more Miro boards. Returns the job id
+            so the caller (or a follow-up tool) can poll for the download URL. Requires
+            the boards:export scope, which is only granted to Enterprise org plans.
+
+            Args:
+                board_id_list (str): Comma-separated board ids to include in the export.
+                format (str): "pdf" or "image". Defaults to "pdf".
+            """
+            org_id = ""  # Miro derives org from the token.
+            payload = {
+                "boardIds": [b.strip() for b in board_id_list.split(",") if b.strip()],
+                "format": format,
+            }
+            url = (
+                f"{MIRO_API_BASE}/orgs/{org_id}/boards/export"
+                if org_id
+                else f"{MIRO_API_BASE}/boards/export"
+            )
+
+            async def do_request(token: str) -> httpx.Response:
+                async with httpx.AsyncClient() as client:
+                    return await client.post(
+                        url,
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Content-Type": "application/json",
+                            "Accept": "application/json",
+                        },
+                        json=payload,
+                    )
+
+            try:
+                response = await call_with_refresh(provider, do_request)
+            except httpx.RequestError as e:
+                return f"Network error occurred while connecting to Miro: {str(e)}"
+
+            if response.status_code == 403:
+                return (
+                    "Error: The token does not have boards:export. This scope is only granted "
+                    "to Miro Enterprise org admins; lower-tier plans cannot use board export."
+                )
+            if response.status_code not in (200, 201, 202):
+                return f"Miro API rejected the export job. Status code: {response.status_code}."
+            data = response.json() or {}
+            return f"Export job queued. Job id: {data.get('jobId', data.get('id', '?'))}"
+
+        @mcp_app.tool()
+        @auth_boundary("miro")
+        @require_scopes([SCOPE_IDENTITY_READ])
+        async def get_miro_token_info() -> str:
+            """
+            Returns metadata about the active Miro OAuth token: associated user id, team id,
+            org id, and granted scopes. Use this when the user asks "who am I in Miro?" or
+            you need to confirm which Miro account is linked.
+            """
+            url = f"{MIRO_API_V1}/oauth-token"
+
+            async def do_request(token: str) -> httpx.Response:
+                async with httpx.AsyncClient() as client:
+                    return await client.get(
+                        url,
+                        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                    )
+
+            try:
+                response = await call_with_refresh(provider, do_request)
+            except httpx.RequestError as e:
+                return f"Network error occurred while connecting to Miro: {str(e)}"
+
+            if response.status_code != 200:
+                return f"Miro API rejected the request. Status code: {response.status_code}."
+            info = response.json() or {}
+            user = info.get("user") or {}
+            team = info.get("team") or {}
+            org = info.get("organization") or {}
+            scopes = info.get("scopes") or []
+            return (
+                f"Miro token info:\n"
+                f"  User: {user.get('name', '?')} (id: {user.get('id', '?')})\n"
+                f"  Team: {team.get('name', '?')} (id: {team.get('id', '?')})\n"
+                f"  Org: {org.get('name', '(no org)')} (id: {org.get('id', '?')})\n"
+                f"  Scopes: {', '.join(scopes) if scopes else '(none reported)'}"
+            )
+
+        @mcp_app.tool()
+        @auth_boundary("miro")
+        @require_scopes([SCOPE_PROJECTS_READ])
+        async def list_miro_projects(org_id: str, team_id: str) -> str:
+            """
+            Lists Miro projects under a given org+team. Projects are a Miro Enterprise
+            grouping above boards. Use this when the user asks about "projects" in Miro
+            (distinct from boards or teams).
+
+            Args:
+                org_id (str): The Miro organization id (visible in token info).
+                team_id (str): The Miro team id.
+            """
+            url = f"{MIRO_API_BASE}/orgs/{org_id}/teams/{team_id}/projects?limit=50"
+
+            async def do_request(token: str) -> httpx.Response:
+                async with httpx.AsyncClient() as client:
+                    return await client.get(
+                        url,
+                        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                    )
+
+            try:
+                response = await call_with_refresh(provider, do_request)
+            except httpx.RequestError as e:
+                return f"Network error occurred while connecting to Miro: {str(e)}"
+
+            if response.status_code == 403:
+                return "Error: The token does not have projects:read access."
+            if response.status_code != 200:
+                return f"Miro API rejected the request. Status code: {response.status_code}."
+            projects = (response.json() or {}).get("data", []) or []
+            if not projects:
+                return "No projects found for this org/team."
+            lines = [f"- {p.get('name', '(unnamed)')} (id: {p.get('id', '?')})" for p in projects]
+            return f"Miro Projects ({len(projects)}):\n" + "\n".join(lines)
+
+        @mcp_app.tool()
+        @auth_boundary("miro")
+        @require_scopes([SCOPE_PROJECTS_WRITE])
+        async def create_miro_project(org_id: str, team_id: str, name: str) -> str:
+            """
+            Creates a new Miro project under a given org+team. Use this when the user
+            explicitly asks to create a Miro project (Enterprise-only feature).
+
+            Args:
+                org_id (str): The Miro organization id.
+                team_id (str): The Miro team id.
+                name (str): Display name for the new project.
+            """
+            url = f"{MIRO_API_BASE}/orgs/{org_id}/teams/{team_id}/projects"
+            payload = {"name": name}
+
+            async def do_request(token: str) -> httpx.Response:
+                async with httpx.AsyncClient() as client:
+                    return await client.post(
+                        url,
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Content-Type": "application/json",
+                            "Accept": "application/json",
+                        },
+                        json=payload,
+                    )
+
+            try:
+                response = await call_with_refresh(provider, do_request)
+            except httpx.RequestError as e:
+                return f"Network error occurred while connecting to Miro: {str(e)}"
+
+            if response.status_code == 403:
+                return "Error: The token does not have projects:write access."
+            if response.status_code not in (200, 201):
+                return f"Miro API rejected project creation. Status code: {response.status_code}."
+            p = response.json() or {}
+            return f"Created Miro project '{p.get('name', name)}' (id: {p.get('id', '?')})."

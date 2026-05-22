@@ -195,3 +195,230 @@ async def test_create_sticky_note_requires_write_scope(set_user_context):
     out = await tools["create_miro_sticky_note"](board_id="X", content="y")
     assert "[PERMISSION REQUIRED]" in out
     assert "boards:write" in out
+
+
+# --- New tools covering the rest of the scope surface -----------------------
+
+
+@respx.mock
+async def test_list_miro_boards_calls_v2_boards(set_user_context, temp_db):
+    set_user_context(email="alice@example.com", token="AT", scopes=["boards:read"])
+    await temp_db.save_tokens("alice@example.com", "miro", "AT", "RT", ["boards:read"], "")
+
+    route = respx.get("https://api.miro.com/v2/boards?limit=20&query=plan").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "total": 2,
+                "data": [
+                    {"id": "b1", "name": "Q3 plan", "description": "draft"},
+                    {"id": "b2", "name": "Roadmap"},
+                ],
+            },
+        )
+    )
+
+    from tests._helpers import collect_tools
+
+    tools = collect_tools(MiroProvider())
+    out = await tools["list_miro_boards"](query="plan", limit=20)
+    assert route.called
+    req = route.calls.last.request
+    assert req.headers["Authorization"] == "Bearer AT"
+    assert "Q3 plan" in out
+    assert "b1" in out
+
+
+async def test_list_miro_boards_clamps_limit(set_user_context, temp_db):
+    """limit > 50 must be clamped to 50 (Miro's max)."""
+    set_user_context(email="alice@example.com", token="AT", scopes=["boards:read"])
+    await temp_db.save_tokens("alice@example.com", "miro", "AT", "RT", ["boards:read"], "")
+
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.get("https://api.miro.com/v2/boards?limit=50").mock(
+            return_value=httpx.Response(200, json={"data": [], "total": 0})
+        )
+        from tests._helpers import collect_tools
+
+        tools = collect_tools(MiroProvider())
+        await tools["list_miro_boards"](limit=999)
+        assert route.called
+
+
+@respx.mock
+async def test_get_miro_board_returns_metadata(set_user_context, temp_db):
+    set_user_context(email="alice@example.com", token="AT", scopes=["boards:read"])
+    await temp_db.save_tokens("alice@example.com", "miro", "AT", "RT", ["boards:read"], "")
+
+    respx.get("https://api.miro.com/v2/boards/B").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "B",
+                "name": "Brainstorm",
+                "description": "Q3 ideas",
+                "viewLink": "https://miro.com/app/board/B/",
+                "owner": {"name": "Alice"},
+                "modifiedAt": "2026-05-22T10:00:00Z",
+            },
+        )
+    )
+
+    from tests._helpers import collect_tools
+
+    tools = collect_tools(MiroProvider())
+    out = await tools["get_miro_board"](board_id="B")
+    assert "Brainstorm" in out
+    assert "Q3 ideas" in out
+    assert "Alice" in out
+
+
+@respx.mock
+async def test_create_miro_board_posts_payload(set_user_context, temp_db):
+    set_user_context(email="alice@example.com", token="AT", scopes=["boards:write"])
+    await temp_db.save_tokens("alice@example.com", "miro", "AT", "RT", ["boards:write"], "")
+
+    route = respx.post("https://api.miro.com/v2/boards").mock(
+        return_value=httpx.Response(
+            201,
+            json={
+                "id": "newB",
+                "name": "New Board",
+                "viewLink": "https://miro.com/app/board/newB/",
+            },
+        )
+    )
+
+    from tests._helpers import collect_tools
+
+    tools = collect_tools(MiroProvider())
+    out = await tools["create_miro_board"](name="New Board", description="hello")
+    assert route.called
+    body = route.calls.last.request.read().decode()
+    assert "New Board" in body
+    assert "hello" in body
+    assert "newB" in out
+
+
+async def test_create_miro_board_requires_write_scope(set_user_context):
+    set_user_context(email="alice@example.com", host="proxy", token="AT", scopes=["boards:read"])
+    from tests._helpers import collect_tools
+
+    tools = collect_tools(MiroProvider())
+    out = await tools["create_miro_board"](name="X")
+    assert "[PERMISSION REQUIRED]" in out
+    assert "boards:write" in out
+
+
+@respx.mock
+async def test_create_miro_board_export_job_uses_export_scope(set_user_context, temp_db):
+    set_user_context(email="alice@example.com", token="AT", scopes=["boards:export"])
+    await temp_db.save_tokens("alice@example.com", "miro", "AT", "RT", ["boards:export"], "")
+
+    route = respx.post("https://api.miro.com/v2/boards/export").mock(
+        return_value=httpx.Response(202, json={"jobId": "job-123"})
+    )
+
+    from tests._helpers import collect_tools
+
+    tools = collect_tools(MiroProvider())
+    out = await tools["create_miro_board_export_job"](board_id_list="B1,B2", format="pdf")
+    assert route.called
+    body = route.calls.last.request.read().decode()
+    assert "B1" in body and "B2" in body
+    assert "pdf" in body
+    assert "job-123" in out
+
+
+async def test_create_miro_board_export_job_requires_export_scope(set_user_context):
+    set_user_context(email="alice@example.com", host="proxy", token="AT", scopes=["boards:read"])
+    from tests._helpers import collect_tools
+
+    tools = collect_tools(MiroProvider())
+    out = await tools["create_miro_board_export_job"](board_id_list="B1")
+    assert "[PERMISSION REQUIRED]" in out
+    assert "boards:export" in out
+
+
+@respx.mock
+async def test_get_miro_token_info_calls_v1_oauth_token(set_user_context, temp_db):
+    set_user_context(email="alice@example.com", token="AT", scopes=["identity:read"])
+    await temp_db.save_tokens("alice@example.com", "miro", "AT", "RT", ["identity:read"], "")
+
+    route = respx.get("https://api.miro.com/v1/oauth-token").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "user": {"id": "u-1", "name": "Alice"},
+                "team": {"id": "t-1", "name": "Acme"},
+                "organization": {"id": "o-1", "name": "Acme Corp"},
+                "scopes": ["identity:read", "boards:read"],
+            },
+        )
+    )
+
+    from tests._helpers import collect_tools
+
+    tools = collect_tools(MiroProvider())
+    out = await tools["get_miro_token_info"]()
+    assert route.called
+    assert "Alice" in out
+    assert "Acme" in out
+
+
+async def test_get_miro_token_info_requires_identity_read(set_user_context):
+    set_user_context(email="alice@example.com", host="proxy", token="AT", scopes=["boards:read"])
+    from tests._helpers import collect_tools
+
+    tools = collect_tools(MiroProvider())
+    out = await tools["get_miro_token_info"]()
+    assert "[PERMISSION REQUIRED]" in out
+    assert "identity:read" in out
+
+
+@respx.mock
+async def test_list_miro_projects_calls_org_team_projects(set_user_context, temp_db):
+    set_user_context(email="alice@example.com", token="AT", scopes=["projects:read"])
+    await temp_db.save_tokens("alice@example.com", "miro", "AT", "RT", ["projects:read"], "")
+
+    route = respx.get("https://api.miro.com/v2/orgs/O/teams/T/projects?limit=50").mock(
+        return_value=httpx.Response(
+            200, json={"data": [{"id": "p-1", "name": "Alpha"}, {"id": "p-2", "name": "Beta"}]}
+        )
+    )
+
+    from tests._helpers import collect_tools
+
+    tools = collect_tools(MiroProvider())
+    out = await tools["list_miro_projects"](org_id="O", team_id="T")
+    assert route.called
+    assert "Alpha" in out and "Beta" in out
+
+
+@respx.mock
+async def test_create_miro_project_posts_name(set_user_context, temp_db):
+    set_user_context(email="alice@example.com", token="AT", scopes=["projects:write"])
+    await temp_db.save_tokens("alice@example.com", "miro", "AT", "RT", ["projects:write"], "")
+
+    route = respx.post("https://api.miro.com/v2/orgs/O/teams/T/projects").mock(
+        return_value=httpx.Response(201, json={"id": "p-new", "name": "Gamma"})
+    )
+
+    from tests._helpers import collect_tools
+
+    tools = collect_tools(MiroProvider())
+    out = await tools["create_miro_project"](org_id="O", team_id="T", name="Gamma")
+    assert route.called
+    body = route.calls.last.request.read().decode()
+    assert "Gamma" in body
+    assert "p-new" in out
+
+
+async def test_create_miro_project_requires_projects_write(set_user_context):
+    set_user_context(email="alice@example.com", host="proxy", token="AT", scopes=["projects:read"])
+    from tests._helpers import collect_tools
+
+    tools = collect_tools(MiroProvider())
+    out = await tools["create_miro_project"](org_id="O", team_id="T", name="X")
+    assert "[PERMISSION REQUIRED]" in out
+    assert "projects:write" in out

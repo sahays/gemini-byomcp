@@ -15,6 +15,7 @@ import httpx
 from fastmcp import FastMCP
 
 from config import config
+from logging_setup import Timer, log_event
 
 logger = logging.getLogger("mcp-providers")
 
@@ -47,15 +48,27 @@ def require_scopes(required_scopes: list[str]):
             active_token = config.current_saas_token.get()
 
             if not active_token:
-                logger.warning(f"Access Denied: No OAuth token found for {user_email}")
+                log_event(
+                    "warning",
+                    "scope.no_token",
+                    logger_name="mcp-providers",
+                    tool=func.__name__,
+                    provider=config.ACTIVE_PROVIDER,
+                    user_email=user_email,
+                )
                 raise MissingScopeException(config.ACTIVE_PROVIDER, required_scopes, [])
 
             active_scopes = config.current_saas_scopes.get()
             missing = [s for s in required_scopes if s not in active_scopes]
             if missing:
-                logger.warning(
-                    f"Access Denied: {user_email} missing scopes {missing}. "
-                    f"Required: {required_scopes}, Active: {active_scopes}"
+                log_event(
+                    "warning",
+                    "scope.denied",
+                    logger_name="mcp-providers",
+                    tool=func.__name__,
+                    provider=config.ACTIVE_PROVIDER,
+                    required_scopes=required_scopes,
+                    missing_scopes=missing,
                 )
                 raise MissingScopeException(config.ACTIVE_PROVIDER, required_scopes, active_scopes)
 
@@ -97,8 +110,26 @@ def auth_boundary(provider_name: str):
     def decorator(func: Callable):
         @functools.wraps(func)
         async def wrapped(*args, **kwargs):
+            log_event(
+                "info",
+                "tool.invoke",
+                logger_name="mcp-providers",
+                tool=func.__name__,
+                provider=provider_name,
+                kwargs=_redact_kwargs(kwargs),
+            )
             try:
-                return await func(*args, **kwargs)
+                with Timer() as t:
+                    result = await func(*args, **kwargs)
+                log_event(
+                    "info",
+                    "tool.success",
+                    logger_name="mcp-providers",
+                    tool=func.__name__,
+                    provider=provider_name,
+                    latency_ms=t.elapsed_ms,
+                )
+                return result
             except MissingScopeException as e:
                 if not e.active_scopes:
                     return (
@@ -119,12 +150,28 @@ def auth_boundary(provider_name: str):
                     f"user against the SaaS."
                 )
             except Exception as e:
+                log_event(
+                    "error",
+                    "tool.error",
+                    logger_name="mcp-providers",
+                    tool=func.__name__,
+                    provider=provider_name,
+                    error=str(e),
+                )
                 logger.error(f"Unexpected tool error: {e}", exc_info=True)
                 return f"Error: An unexpected internal error occurred during processing: {str(e)}"
 
         return wrapped
 
     return decorator
+
+
+_REDACT_KEYS = {"token", "access_token", "refresh_token", "secret", "client_secret"}
+
+
+def _redact_kwargs(kwargs: dict) -> dict:
+    """Strip obvious secret-looking keys before logging tool kwargs."""
+    return {k: ("<redacted>" if k.lower() in _REDACT_KEYS else v) for k, v in kwargs.items()}
 
 
 HttpCall = Callable[[str], Awaitable[httpx.Response]]
@@ -140,12 +187,33 @@ async def call_with_refresh(provider: "BaseProvider", request_fn: HttpCall) -> h
     the user on its side.
     """
     token = config.current_saas_token.get()
-    response = await request_fn(token)
+    with Timer() as t:
+        response = await request_fn(token)
+    try:
+        req = response.request
+        method = req.method
+        url = str(req.url)
+    except RuntimeError:
+        method = "?"
+        url = "?"
+    log_event(
+        "info" if response.status_code < 400 else "warning",
+        "saas.call",
+        logger_name="mcp-providers",
+        provider=provider.name,
+        method=method,
+        url=url,
+        status_code=response.status_code,
+        latency_ms=t.elapsed_ms,
+    )
     if response.status_code != 401:
         return response
 
-    logger.warning(
-        f"401 from {provider.name}; passthrough mode — Gemini Enterprise must re-OAuth the user."
+    log_event(
+        "warning",
+        "saas.401_reauth_needed",
+        logger_name="mcp-providers",
+        provider=provider.name,
     )
     raise RefreshFailedException(
         f"{provider.name} rejected the bearer token; GE needs to re-authenticate the user."
