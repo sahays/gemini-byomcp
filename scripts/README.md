@@ -1,6 +1,6 @@
 # Deployment playbook
 
-Step-by-step instructions to go from `git clone` to a working Gemini Enterprise integration. For background on the architecture, see the [main README](../README.md).
+Step-by-step instructions to go from `git clone` to a working Gemini Enterprise integration. For architecture background, prerequisites (org policies, IAM), and per-provider GE dialog values, see the [main README](../README.md).
 
 ## Contents
 
@@ -13,169 +13,165 @@ All four scripts support `--help`.
 
 ---
 
-## 0. Prerequisites on the operator machine
+## 0. Operator machine prerequisites
 
 | Tool | Why |
 |---|---|
-| `gcloud` ≥ 460 | Cloud Run, Secret Manager, Artifact Registry |
-| `docker` (any modern version) | Local image build/push to Artifact Registry |
+| `gcloud` ≥ 460 | Cloud Run + Artifact Registry |
+| `docker` | Local image build + push |
 | `python3` ≥ 3.11 with `pip` | Pre-deploy lint/format/tests |
 
 Authenticate:
 
 ```bash
-gcloud auth login                       # browser flow on personal machines
-gcloud auth application-default login   # for libraries that use ADC
+gcloud auth login                       # personal machine
+gcloud auth application-default login   # for libraries using ADC
 ```
 
-In CI, use a service account key bound to the customer's project with roles `roles/run.admin`, `roles/iam.serviceAccountUser`, `roles/artifactregistry.writer`, `roles/secretmanager.admin`, `roles/datastore.user`.
+In CI, use a service account key with `roles/run.admin`, `roles/artifactregistry.writer`, `roles/serviceusage.serviceUsageAdmin`. **No** Secret Manager, Firestore, or IAM-policy-admin roles needed — passthrough mode doesn't use them.
 
 ## 1. Clone and install dev deps
 
 ```bash
 git clone <repo-url> gemini-enterprise-custom-mcp-proxy
 cd gemini-enterprise-custom-mcp-proxy
-
 pip install -r requirements-dev.txt   # runtime + ruff + pytest + respx
 ```
 
 ## 2. Run the pre-deploy gate
 
 ```bash
-scripts/predeploy.sh        # ruff format + ruff check + pytest (55 tests)
+scripts/predeploy.sh         # ruff format + ruff check + pytest (68 tests)
+scripts/predeploy.sh --fix   # auto-apply lint/format fixes
 ```
 
-Run this *before* touching the customer's GCP project. If anything is red:
+Run this *before* deploying. If the gate is red, fix and re-run.
 
-```bash
-scripts/predeploy.sh --fix  # apply formatting and auto-fixable lint
-scripts/predeploy.sh        # re-verify
-```
+## 3. Confirm GCP prerequisites
 
-## 3. Create OAuth apps in the three SaaS
+These are one-time per project. Skip whichever you've already done. See the [main README → Prerequisites](../README.md#prerequisites) for full detail and gcloud commands.
 
-For each, create an app in the developer console and capture the **client_id** + **client_secret**. You can use a placeholder for the redirect URI now — you'll fill in the real one in step 7.
+- [ ] **Org policy `discoveryengine.managed.disableCustomMcpServerConnector` is `enforce: false`** at the project level. Without this, GE silently won't dispatch to your MCP server. Needs `roles/orgpolicy.policyAdmin`.
+- [ ] **IAM/org policy permits `allUsers` on Cloud Run services** (either via `iam.allowedPolicyMemberDomains` override or via the per-service "Allow unauthenticated invocations" toggle in the Cloud Run UI).
+- [ ] You hold `roles/discoveryengine.editor` in the GE console where you'll create the data store.
 
-| SaaS | Developer console | Notes |
+## 4. Create the SaaS app(s)
+
+For each provider you plan to deploy, create an OAuth app and capture **client_id** + **client_secret**.
+
+| SaaS | Console | Notes |
 |---|---|---|
-| Miro | https://miro.com/app/settings/user-profile/apps | Enable the scopes you want; see [main README](../README.md#apis-and-scopes-by-saas) for the full non-admin list |
-| Figma | https://www.figma.com/developers/apps | `file_variables:*` and `library_analytics:read` require Enterprise; `projects:read` requires a private OAuth app |
-| Lucid | https://developer.lucid.co/ | Granting parent scopes (`lucidchart.document.content` etc.) covers child permissions automatically |
+| Miro | https://miro.com/app/settings/user-profile/apps | Enable `boards:read`, `boards:write`, `identity:read` (and `team:*` if available) |
+| Figma | https://www.figma.com/developers/apps | Enable `current_user:read`, `file_content:read`, `file_comments:read+write`, `library_content:read`, `library_assets:read` |
+| Lucid | https://lucid.app/developer | Enable `user.profile`, `offline_access`, the `lucidchart`/`lucidspark`/`lucidscale.document.content` set |
 
-## 4. Create the Google OAuth client (for Gemini Enterprise inbound)
-
-This client lets Gemini Enterprise issue bearer tokens that the proxy will validate via Google's `tokeninfo` endpoint.
+For all three, set the **OAuth redirect URI** to:
 
 ```
-GCP Console → APIs & Services → Credentials → Create Credentials → OAuth client ID
-  Application type:        Web application
-  Authorized redirect URI: https://vertexaisearch.cloud.google.com/oauth-redirect
+https://vertexaisearch.cloud.google.com/oauth-redirect
 ```
 
-Capture the **client ID**. You'll set it as `GOOGLE_CLIENT_ID` next.
+(GE handles the callback — the proxy has no `/auth/*` routes in passthrough mode.)
 
-## 5. Build the credentials file
+## 5. Deploy
+
+Only `PROJECT` is required. The proxy holds no SaaS credentials — GE owns the OAuth flow.
 
 ```bash
-cp .env.example customer.env
-$EDITOR customer.env
+./scripts/deploy-miro.sh  --project <PROJECT_ID>
+./scripts/deploy-figma.sh --project <PROJECT_ID>
+./scripts/deploy-lucid.sh --project <PROJECT_ID>
 ```
 
-Fill in:
-
-```dotenv
-PROJECT=customer-gcp-project-id
-REGION=us-central1
-GOOGLE_CLIENT_ID=<from step 4>
-
-MIRO_CLIENT_ID=<from step 3>
-MIRO_CLIENT_SECRET=<from step 3>
-
-FIGMA_CLIENT_ID=<from step 3>
-FIGMA_CLIENT_SECRET=<from step 3>
-
-LUCID_CLIENT_ID=<from step 3>
-LUCID_CLIENT_SECRET=<from step 3>
-```
-
-## 6. Deploy each provider
+Or via `.env` for repeatable customer deploys:
 
 ```bash
+echo "PROJECT=<PROJECT_ID>" > customer.env
 ./scripts/deploy-miro.sh  --env-file customer.env
 ./scripts/deploy-figma.sh --env-file customer.env
 ./scripts/deploy-lucid.sh --env-file customer.env
 ```
 
-Per provider, each script:
+What each script does:
 
-1. Enables `run`, `artifactregistry`, `secretmanager`, `firestore` APIs
-2. Upserts the SaaS client_id/secret into Secret Manager (`{provider}-client-id`, `{provider}-client-secret`)
-3. Creates the Artifact Registry repo `mcp-proxy` if missing
-4. Builds the image locally with `docker build` and pushes to `${REGION}-docker.pkg.dev/${PROJECT}/mcp-proxy/{service-name}:{timestamp}`
-5. Deploys to Cloud Run with `ACTIVE_PROVIDER={provider}`, secrets bound via `--set-secrets`, env vars via `--set-env-vars`
-6. Reads back the resulting service URL and updates the `{PROVIDER}_REDIRECT_URI` env var to `https://<service-url>/auth/{provider}/callback`
+1. Enables `run.googleapis.com` and `artifactregistry.googleapis.com` (nothing else)
+2. Ensures the Artifact Registry repo `mcp-proxy` exists in `REGION`
+3. Builds the image locally with `docker build`
+4. Pushes to `${REGION}-docker.pkg.dev/${PROJECT}/mcp-proxy/{service}:{timestamp}`
+5. Deploys to Cloud Run with `ACTIVE_PROVIDER={provider}` and `ALLOWED_ORIGINS=https://vertexaisearch.cloud.google.com`
+6. Prints the service URL + the exact field values to paste into the GE "Custom MCP Server" dialog
 
-Each script ends with a banner that prints:
+Save the printed service URL for the next step.
 
-```
-Service URL:   https://mcp-miro-abc123-uc.a.run.app
-MCP endpoint:  https://mcp-miro-abc123-uc.a.run.app/mcp
-Next steps:
-  1. In the Miro developer console, set the OAuth redirect URI to:
-       https://mcp-miro-abc123-uc.a.run.app/auth/miro/callback
-  2. In Gemini Enterprise, register the MCP server URL: ...
-```
-
-**Save those URLs.**
-
-## 7. Register each SaaS's redirect URI
-
-Go back to each SaaS developer console (step 3) and set the OAuth redirect URI to the one printed by the deploy script (`https://mcp-{provider}-…/auth/{provider}/callback`). Without this, the OAuth callback in step 10 will fail.
-
-## 8. Register each MCP server with Gemini Enterprise
+## 6. Register each MCP server with Gemini Enterprise
 
 ```
 GCP Console → Gemini Enterprise → Data stores → Create → Custom MCP Server
-  MCP server URL:        https://mcp-{provider}-…/mcp
-  Authorization URL:     <your IdP's OAuth authorize endpoint>
-  Token URL:             <your IdP's OAuth token endpoint>
-  Client ID / Secret:    from step 4
-  Scopes:                openid email offline_access
 ```
 
-Repeat for `mcp-miro`, `mcp-figma`, `mcp-lucid`. Then click **Actions → Reload custom actions** so GE pulls the tool definitions.
+The deploy script printed the exact field values. For reference, here's the shape per provider:
 
-## 9. Shred the credentials file
+### Miro
 
-The secrets are now in Secret Manager. Don't leave the file on disk.
+| Field | Value |
+|---|---|
+| MCP Server URL | `<service-url>/mcp` |
+| Authorization URL | `https://miro.com/oauth/authorize` |
+| Auth URL Parameters | *(blank)* |
+| Token URL | `https://api.miro.com/v1/oauth/token` |
+| Client ID / Secret | *(from step 4)* |
+| Scopes | `boards:read boards:write identity:read` |
+
+### Figma
+
+| Field | Value |
+|---|---|
+| MCP Server URL | `<service-url>/mcp` |
+| Authorization URL | `https://www.figma.com/oauth` |
+| Auth URL Parameters | *(blank)* |
+| Token URL | `https://api.figma.com/v1/oauth/token` |
+| Client ID / Secret | *(from step 4)* |
+| Scopes | `current_user:read file_comments:read file_comments:write file_content:read library_assets:read library_content:read` |
+
+### Lucid
+
+| Field | Value |
+|---|---|
+| MCP Server URL | `<service-url>/mcp` |
+| Authorization URL | `https://lucid.app/oauth2/authorize` |
+| Auth URL Parameters | *(blank; `offline_access` goes in Scopes)* |
+| Token URL | `https://api.lucid.co/oauth2/token` |
+| Client ID / Secret | *(from step 4)* |
+| Scopes | `user.profile offline_access lucidchart.document.content lucidspark.document.content lucidscale.document.content` |
+
+## 7. Login + Reload custom actions
+
+For each data store:
+
+1. **Click Login** in the dialog and complete the SaaS OAuth flow. GE stores per-user tokens.
+2. Open the data store → **Actions → Reload custom actions**. GE calls `tools/list` on your `/mcp` endpoint and shows the tool catalog.
+3. **Enable** the tools you want GE's agent to call.
+4. **Attach** the data store to a **conversational/Agent app** (not a Search app — Search apps don't dispatch MCP tool calls).
+
+If reload fails with 401, recheck the org-policy and Allow-unauthenticated prereqs (step 3). If it fails with 307, you're on an old branch — pull latest.
+
+## 8. Smoke-test
+
+Tail logs in one terminal:
 
 ```bash
-shred -u customer.env      # macOS: rm -P customer.env
+gcloud run services logs tail mcp-miro --region us-central1 --project <PROJECT_ID>
 ```
 
-## 10. Smoke-test
+In GE chat:
 
-In Gemini Enterprise, ask a question that exercises one tool per provider — e.g.
+| Provider | Prompt | Expect in logs |
+|---|---|---|
+| Miro | "List my Miro boards" | `tool.invoke list_miro_boards` → `saas.call ...v2/boards status_code=200` |
+| Figma | "Who am I in Figma?" | `tool.invoke get_figma_me` → `saas.call ...v1/me status_code=200` |
+| Lucid | "Search my Lucid documents for X" | `tool.invoke search_lucid_documents` → `saas.call ...documents/search status_code=200` |
 
-> "List components in my Figma team `<team_id>`"
-
-On the first invocation, the proxy returns:
-
-```
-[ACTION REQUIRED] Your Figma account is not linked.
-Please link your account securely by visiting this authorization link:
-https://mcp-figma-…/auth/figma?user=alice@corp.example
-```
-
-The user clicks the link, completes the Figma OAuth consent screen, then re-asks the question and the tool returns data.
-
-If a tool returns:
-
-```
-[PERMISSION REQUIRED] Figma scope 'library_content:read' not granted.
-```
-
-then that scope wasn't included in the SaaS app's enabled scopes (step 3) — fix it in the SaaS developer console and have the user re-link.
+If a tool returns `Access forbidden (...)`, the SaaS access token lacks that scope — add it to GE's Scopes field and re-Login.
 
 ---
 
@@ -184,22 +180,21 @@ then that scope wasn't included in the SaaS app's enabled scopes (step 3) — fi
 ```bash
 git pull
 scripts/predeploy.sh                              # validate first
-./scripts/deploy-miro.sh --env-file customer.env  # or export the env vars from a vault
+./scripts/deploy-miro.sh --project <PROJECT_ID>   # or --env-file customer.env
 ```
 
-The image is rebuilt + pushed locally, secrets in Secret Manager are reused, Cloud Run is updated in place. Users keep their existing token grants — their refresh_tokens live in Firestore and the new container picks them up immediately.
+Image is rebuilt + pushed, Cloud Run revision is rolled out. GE's stored per-user SaaS tokens are unaffected (they live in GE, not in the proxy) — users don't need to re-link.
 
 ## Script flags reference
 
-All three deploy scripts accept the same shape. See `scripts/deploy-{miro,figma,lucid}.sh --help` for the authoritative list.
+```bash
+./scripts/deploy-{miro,figma,lucid}.sh --help
+```
 
-| Flag | Equivalent env var | Default | Required |
+| Flag | Env var | Default | Required |
 |---|---|---|---|
 | `--env-file <path>` | — | — | no |
-| `--project` | `PROJECT` | — | yes |
-| `--google-client-id` | `GOOGLE_CLIENT_ID` | — | yes |
-| `--{provider}-client-id` | `{PROVIDER}_CLIENT_ID` | — | yes |
-| `--{provider}-client-secret` | `{PROVIDER}_CLIENT_SECRET` | — | yes |
+| `--project` | `PROJECT` | — | **yes** |
 | `--region` | `REGION` | `us-central1` | no |
 | `--service-name` | `SERVICE_NAME` | `mcp-{provider}` | no |
 | `--allowed-origins` | `ALLOWED_ORIGINS` | `https://vertexaisearch.cloud.google.com` | no |
