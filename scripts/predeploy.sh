@@ -47,7 +47,7 @@ if ! $SKIP_TESTS; then
   need pytest
 fi
 
-PY_TARGETS=(config.py database.py server.py providers tests)
+PY_TARGETS=(config.py logging_setup.py server.py providers tests)
 
 run_format() {
   if $FIX_MODE; then

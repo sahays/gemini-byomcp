@@ -43,9 +43,6 @@ class Config:
         "LUCID_REDIRECT_URI", "http://localhost:8080/auth/lucid/callback"
     )
 
-    # --- Database Settings ---
-    GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
-
     # --- Request-Scoped Context Variables ---
     # Thread-safe context variables populated by the identity middleware
     current_user_email: ContextVar[str] = ContextVar("current_user_email", default="")

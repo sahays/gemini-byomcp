@@ -10,7 +10,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY config.py database.py logging_setup.py server.py ./
+COPY config.py logging_setup.py server.py ./
 COPY providers/ ./providers/
 
 RUN chown -R mcpuser:mcpuser /app

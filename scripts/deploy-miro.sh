@@ -150,7 +150,7 @@ Next steps for Gemini Enterprise:
        Token URL: https://api.miro.com/v1/oauth/token
        Client ID:  <your Miro app's client_id>
        Client Secret: <your Miro app's client secret>
-       Scopes: boards:read boards:write boards:export identity:read projects:read projects:write
+       Scopes: boards:read boards:write identity:read
   3. Click Login in the dialog and complete the consent flow.
 ================================================================================
 EOF

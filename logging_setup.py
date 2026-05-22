@@ -84,7 +84,7 @@ def log_event(level: str, event: str, logger_name: str = "mcp", **fields: Any) -
 class Timer:
     """Tiny context manager to measure outbound call latency."""
 
-    def __enter__(self) -> "Timer":
+    def __enter__(self) -> Timer:
         self.t0 = time.perf_counter()
         return self
 
