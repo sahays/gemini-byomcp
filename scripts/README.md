@@ -63,7 +63,7 @@ For each provider you plan to deploy, create an OAuth app and capture **client_i
 |---|---|---|
 | Miro | https://miro.com/app/settings/user-profile/apps | Enable `boards:read`, `boards:write`, `identity:read` (and `team:*` if available) |
 | Figma | https://www.figma.com/developers/apps | Enable `current_user:read`, `file_content:read`, `file_comments:read+write`, `library_content:read`, `library_assets:read` |
-| Lucid | https://lucid.app/developer | Enable `user.profile`, `offline_access`, the `lucidchart`/`lucidspark`/`lucidscale.document.content` set |
+| Lucid | https://lucid.app/developer | Enable `user.profile`, `offline_access`, `lucidchart.document.content` |
 
 For all three, set the **OAuth redirect URI** to:
 
@@ -142,7 +142,7 @@ The deploy script printed the exact field values. For reference, here's the shap
 | Auth URL Parameters | *(blank; `offline_access` goes in Scopes)* |
 | Token URL | `https://api.lucid.co/oauth2/token` |
 | Client ID / Secret | *(from step 4)* |
-| Scopes | `user.profile offline_access lucidchart.document.content lucidspark.document.content lucidscale.document.content` |
+| Scopes | `user.profile offline_access lucidchart.document.content` |
 
 ## 7. Login + Reload custom actions
 

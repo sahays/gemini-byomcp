@@ -27,29 +27,17 @@ LUCID_API_BASE = "https://api.lucid.co"
 
 # Single source of truth for Lucid scope strings. The consent URL requests the union
 # of these; tool decorators must only reference values from this list.
-# Excludes admin-only scopes (account.info, account.user*, account.user.transfercontent).
-# Uses parent scopes only — Lucid grants child permissions automatically when a parent
-# is granted (e.g. `lucidchart.document.content` implies `:readonly`, `.share.*`, etc.).
+# Minimum viable set: identity probe + document content + refresh-token capability.
+# Lucid grants child permissions automatically when a parent scope is granted
+# (e.g. lucidchart.document.content implies :readonly, .share.*, etc.).
 SCOPE_USER_PROFILE = "user.profile"
 SCOPE_OFFLINE_ACCESS = "offline_access"  # required to receive a refresh_token
-SCOPE_FOLDER = "folder"
 SCOPE_LUCIDCHART_CONTENT = "lucidchart.document.content"
-SCOPE_LUCIDCHART_APP = "lucidchart.document.app"
-SCOPE_LUCIDSPARK_CONTENT = "lucidspark.document.content"
-SCOPE_LUCIDSPARK_APP = "lucidspark.document.app"
-SCOPE_LUCIDSCALE_CONTENT = "lucidscale.document.content"
-SCOPE_LUCIDSCALE_APP = "lucidscale.document.app"
 
 ALL_SCOPES = [
     SCOPE_USER_PROFILE,
     SCOPE_OFFLINE_ACCESS,
-    SCOPE_FOLDER,
     SCOPE_LUCIDCHART_CONTENT,
-    SCOPE_LUCIDCHART_APP,
-    SCOPE_LUCIDSPARK_CONTENT,
-    SCOPE_LUCIDSPARK_APP,
-    SCOPE_LUCIDSCALE_CONTENT,
-    SCOPE_LUCIDSCALE_APP,
 ]
 DEFAULT_LUCID_SCOPES = " ".join(ALL_SCOPES)
 

@@ -143,9 +143,9 @@ Scopes are defined as `SCOPE_*` constants in `providers/<name>.py:ALL_SCOPES`. T
 | `get_lucid_document_contents` | `lucidchart.document.content` |
 | `search_lucid_documents` | `lucidchart.document.content` |
 
-**Recommended GE scope string:** `user.profile offline_access lucidchart.document.content lucidspark.document.content lucidscale.document.content`
+**Recommended GE scope string:** `user.profile offline_access lucidchart.document.content`
 
-(`offline_access` is required for refresh tokens.)
+(`offline_access` is required for refresh tokens. Lucid grants child permissions automatically when the `lucidchart.document.content` parent is granted.)
 
 ## Step-by-step: register each SaaS in GE
 
@@ -222,7 +222,7 @@ Same shape for all three. Substitute `<service-url>` with what the deploy script
 
 1. **Configure the Lucid app** at https://lucid.app/developer:
    - **Redirect URI**: `https://vertexaisearch.cloud.google.com/oauth-redirect`
-   - **Enable scopes**: `user.profile`, `offline_access`, `lucidchart.document.content`, `lucidspark.document.content`, `lucidscale.document.content`
+   - **Enable scopes**: `user.profile`, `offline_access`, `lucidchart.document.content`
    - Copy **Client ID** and **Client Secret**.
 
 2. **Deploy**:
@@ -239,7 +239,7 @@ Same shape for all three. Substitute `<service-url>` with what the deploy script
    | Token URL | `https://api.lucid.co/oauth2/token` |
    | Client ID | *(your Lucid app's client_id)* |
    | Client Secret | *(your Lucid app's client secret)* |
-   | Scopes | `user.profile offline_access lucidchart.document.content lucidspark.document.content lucidscale.document.content` |
+   | Scopes | `user.profile offline_access lucidchart.document.content` |
 
 4. **Click Login** and complete Lucid consent.
 

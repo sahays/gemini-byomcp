@@ -153,7 +153,6 @@ Next steps for Gemini Enterprise:
        Client ID            : <your Lucid app's client_id>
        Client Secret        : <your Lucid app's client secret>
        Scopes               : user.profile offline_access lucidchart.document.content
-                              lucidspark.document.content lucidscale.document.content
   3. Click Login in the dialog and complete the consent flow.
 ================================================================================
 EOF

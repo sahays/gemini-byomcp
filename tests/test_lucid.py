@@ -18,19 +18,22 @@ def test_get_auth_url_includes_offline_access():
     assert url.startswith("https://lucid.app/oauth2/authorize?")
     assert "client_id=lucid-test-id" in url
     assert "state=alice@example.com" in url
-    # Every non-admin scope must be in the consent URL.
+    # Minimum-viable scope set: identity + document content + refresh-token.
     for scope in (
         "user.profile",
         "offline_access",  # required to get a refresh_token from Lucid
-        "folder",
         "lucidchart.document.content",
+    ):
+        assert scope in url, f"Missing {scope} from Lucid consent URL"
+    for excluded in (
+        "folder",
         "lucidchart.document.app",
         "lucidspark.document.content",
         "lucidspark.document.app",
         "lucidscale.document.content",
         "lucidscale.document.app",
     ):
-        assert scope in url, f"Missing {scope} from Lucid consent URL"
+        assert excluded not in url, f"Unexpected scope {excluded} in consent URL"
 
 
 @respx.mock
